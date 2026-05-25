@@ -1,16 +1,42 @@
 [project]
-name = "customer-support-agent-with-mem0"
+name = "customer-support-agent"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.11"
+description = "AI copilot for support agents with FastAPI, LangChain, Mem0, and ChromaDB"
+readme = "Plan.md"
+requires-python = ">=3.11,<3.12"
 dependencies = [
-    "chromadb>=1.5.9",
-    "dotenv>=0.9.9",
-    "ipywidgets>=8.1.8",
-    "jupyter>=1.1.1",
-    "langchain>=1.3.1",
-    "langchain-groq>=1.1.2",
-    "mem0ai[nlp]>=2.0.2",
-    "sentence-transformers>=5.5.1",
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic-settings",
+  "python-dotenv",
+  "langchain",
+  "langchain-core",
+  "langchain-groq",
+  "langchain-text-splitters",
+  "mem0ai",
+  "chromadb",
+  "streamlit",
+  "requests",
+  "email-validator",
+  "google-genai",
+  "sentence-transformers",
+  "torch",
+]
+
+[tool.uv]
+package = false
+
+# Optional torch CPU index (enable only if uncommenting "torch" above): 
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[dependency-groups]
+dev = [
+  "playwright>=1.58.0",
+  "pytest",
 ]
