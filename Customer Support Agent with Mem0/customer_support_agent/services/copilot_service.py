@@ -599,3 +599,9 @@ class SupportCopilot:
             "Next, we will continue investigating and share an update with concrete steps shortly.\n\n"
             "Best,\nSupport Team"
         )
+
+
+
+
+
+

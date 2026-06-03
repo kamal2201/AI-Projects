@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Any, Literal
 from pydantic import BaseModel, EmailStr, Field
 
+
 class TicketCreateRequest(BaseModel):
     customer_email: EmailStr
     customer_name: str | None = None
@@ -10,6 +11,7 @@ class TicketCreateRequest(BaseModel):
     description: str = Field(min_length=10)
     priority: Literal["low", "medium", "high", "urgent"] = "medium"
     auto_generate: bool = True
+
 
 class TicketResponse(BaseModel):
     id: int
@@ -24,6 +26,7 @@ class TicketResponse(BaseModel):
     created_at: str
     updated_at: str
 
+
 class DraftSignals(BaseModel):
     memory_hit_count: int = 0
     knowledge_hit_count: int = 0
@@ -31,10 +34,12 @@ class DraftSignals(BaseModel):
     tool_error_count: int = 0
     knowledge_sources: list[str] = Field(default_factory=list)
 
+
 class DraftHighlights(BaseModel):
     memory: list[str] = Field(default_factory=list)
     knowledge: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
+
 
 class DraftToolCall(BaseModel):
     tool_name: str
@@ -72,6 +77,7 @@ class GenerateDraftResponse(BaseModel):
     ticket_id: int
     draft: DraftResponse
 
+
 class KnowledgeIngestRequest(BaseModel):
     clear_existing: bool = False
 
@@ -80,10 +86,13 @@ class KnowledgeIngestResponse(BaseModel):
     chunks_indexed: int
     collection_count: int
 
+
 class CustomerMemoriesResponse(BaseModel):
     customer_id: int
     customer_email: EmailStr
     memories: list[dict[str, Any]]
+
+
 
 class CustomerMemorySearchResponse(BaseModel):
     customer_id: int
