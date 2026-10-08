@@ -67,3 +67,64 @@ class FeedForwardBlock(nn.Module):
         x = self.dropout(x)
         x = self.linear2(x)
         return x
+    
+class MultiHeadAttention(nn.Module):
+    
+    def __init__(self, d_model: int, h: int, dropout: float) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.h = h
+        assert d_model % h == 0, "d_model must be divisible by h"
+        
+        self.d_k = d_model // h
+        
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
+        
+        self.w_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    @staticmethod
+    def attention(self, query, key, value, mask = None, dropout = None):
+        d_k = query.size(-1)
+        
+        # (batch_size, h, seq_length, d_k) @ (batch_size, h, d_k, seq_length) -> (batch_size, h, seq_length, seq_length)
+        attention_scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k) # (batch_size, h, seq_length, seq_length)
+        if mask is not None:
+            attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
+            
+        attention_scores = torch.softmax(attention_scores, dim = -1) # (batch_size, h, seq_length, seq_length)
+        
+        if dropout is not None:
+            attention_scores = dropout(attention_scores)
+            
+        return (attention_scores @ value, attention_scores) # (batch_size, h, seq_length, d_k), (batch_size, h, seq_length, seq_length)
+        
+    def forward(self, q, k, v, mask = None):
+        query = self.w_q(q) # (batch_size, seq_length, d_model)
+        key = self.w_k(k)   # (batch_size, seq_length, d_model)
+        value = self.w_v(v) # (batch_size, seq_length, d_model)
+        
+        # (batch_size, seq_length, d_model) -> (batch_soze, seq_length, h, d_k) -> apply transpose -> (batch_size, h, seq_length, d_k)
+        query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1, 2) # (batch_size, h, seq_length, d_k)
+        key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2) # (batch_size, h, seq_length, d_k)
+        value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2) # (batch_size, h, seq_length, d_k)
+        
+        x, self.attention_scores = MultiHeadAttention.attention(self, query, key, value, mask, self.dropout) # (batch_size, h, seq_length, d_k)
+
+        x = x.transpose(1, 2).contiguous().view(x.shape[0], x.shape[2], self.d_model) # (batch_size, seq_length, d_model)
+        
+        return self.w_o(x) # (batch_size, seq_length, d_model)
+    
+class ResidualConnection(nn.Module):
+    
+    def __init__(self, dropout: float) -> None:
+        super().__init__()
+        self.dropout = nn.Dropout(dropout)
+        self.norm = LayerNormalization()
+        
+    def forward(self, x, sublayer):
+        return x + self.dropout(sublayer(self.norm(x)))
+        
