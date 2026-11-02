@@ -52,6 +52,7 @@ class Receiver:
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
         allow_overwrite: bool = False,
         advertise: bool = True,
+        enable_ble: bool = True,
         display_name: str | None = None,
     ) -> None:
         self.host = host
@@ -62,6 +63,7 @@ class Receiver:
         self.max_file_size = max_file_size
         self.allow_overwrite = allow_overwrite
         self.advertise = advertise
+        self.enable_ble = enable_ble
         self.display_name = display_name
 
         self.server_sock: socket.socket | None = None
@@ -94,10 +96,11 @@ class Receiver:
                 self.advertiser = ServiceAdvertiser(
                     port=self.active_port,
                     display_name=self.display_name,
+                    enable_ble=self.enable_ble,
                 )
                 self.advertiser.start()
             except Exception as err:
-                logger.warning("Could not start mDNS advertisement: %s", err)
+                logger.warning("Could not start service advertisement: %s", err)
 
         try:
             while self._running:
@@ -333,6 +336,11 @@ def main() -> None:
         help="Disable mDNS / DNS-SD local network advertisement",
     )
     parser.add_argument(
+        "--no-ble",
+        action="store_true",
+        help="Disable BLE peripheral advertisement",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose DEBUG logging",
@@ -354,6 +362,7 @@ def main() -> None:
         timeout=args.timeout,
         allow_overwrite=args.overwrite,
         advertise=not args.no_advertise,
+        enable_ble=not args.no_ble,
         display_name=args.name,
     )
 

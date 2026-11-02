@@ -24,6 +24,20 @@ from zeroconf import (
     Zeroconf,
 )
 
+from src.ble_discovery import (
+    AIRDROP_BLE_SERVICE_UUID,
+    BleAdvertiser,
+    BleAdvertisement,
+    BleScanner,
+    BleStatus,
+)
+from src.registry import (
+    DeviceRegistry,
+    DeviceState,
+    DiscoverySource,
+    UnifiedDevice,
+)
+
 logger = logging.getLogger("airdrop.discovery")
 
 # Service type definition for AirDrop over TCP
@@ -139,7 +153,7 @@ class DiscoveredDevice:
 
 
 class ServiceAdvertiser:
-    """Advertises the AirDrop file receiver service via mDNS/DNS-SD."""
+    """Advertises the AirDrop file receiver service via mDNS/DNS-SD and BLE."""
 
     def __init__(
         self,
@@ -147,6 +161,8 @@ class ServiceAdvertiser:
         display_name: str | None = None,
         service_type: str = AIRDROP_SERVICE_TYPE,
         zc: Zeroconf | None = None,
+        enable_ble: bool = True,
+        use_mock_ble: bool = False,
     ) -> None:
         self.port = port
         self.service_type = service_type
@@ -155,11 +171,21 @@ class ServiceAdvertiser:
         self._custom_zc = zc is not None
         self.zc: Zeroconf | None = zc
         self.service_info: ServiceInfo | None = None
+        self.enable_ble = enable_ble
+        self.use_mock_ble = use_mock_ble
         self._is_advertising = False
         self._lock = threading.Lock()
 
+        self.ble_advertiser: BleAdvertiser | None = None
+        if self.enable_ble:
+            self.ble_advertiser = BleAdvertiser(
+                node_id=self.node_id,
+                display_name=self.display_name,
+                use_mock=self.use_mock_ble,
+            )
+
     def start(self) -> None:
-        """Register the mDNS service advertisement."""
+        """Register the mDNS and BLE service advertisements."""
         with self._lock:
             if self._is_advertising:
                 return
@@ -217,11 +243,25 @@ class ServiceAdvertiser:
                 self._is_advertising = True
                 logger.info("mDNS service registered with fallback name: '%s'", full_service_name)
 
+            # Start BLE advertisement if enabled
+            if self.ble_advertiser:
+                try:
+                    ble_status = self.ble_advertiser.start()
+                    logger.debug("BLE advertiser start result: %s", ble_status.value)
+                except Exception as err:
+                    logger.warning("Could not start BLE advertisement: %s", err)
+
     def stop(self) -> None:
-        """Unregister the service and broadcast goodbye packet."""
+        """Unregister mDNS service, stop BLE, and broadcast goodbye packet."""
         with self._lock:
             if not self._is_advertising:
                 return
+
+            if self.ble_advertiser:
+                try:
+                    self.ble_advertiser.stop()
+                except Exception as err:
+                    logger.debug("Error stopping BLE advertiser: %s", err)
 
             if self.zc and self.service_info:
                 try:
@@ -239,7 +279,7 @@ class ServiceAdvertiser:
 
             self.service_info = None
             self._is_advertising = False
-            logger.info("mDNS service successfully stopped.")
+            logger.info("Service advertiser successfully stopped.")
 
     def __enter__(self) -> ServiceAdvertiser:
         self.start()
@@ -250,27 +290,34 @@ class ServiceAdvertiser:
 
 
 class PeerBrowser(ServiceListener):
-    """Browses and maintains the active registry of AirDrop devices on the LAN."""
+    """Browses and maintains the active registry of AirDrop devices on the LAN and BLE."""
 
     def __init__(
         self,
         service_type: str = AIRDROP_SERVICE_TYPE,
         zc: Zeroconf | None = None,
         on_change: Callable[[], None] | None = None,
+        registry: DeviceRegistry | None = None,
+        enable_ble: bool = True,
+        use_mock_ble: bool = False,
     ) -> None:
         self.service_type = service_type
         self._custom_zc = zc is not None
         self.zc: Zeroconf | None = zc
         self.browser: ServiceBrowser | None = None
         self.on_change = on_change
+        self.registry = registry or DeviceRegistry(on_change=on_change)
+        self.enable_ble = enable_ble
+        self.use_mock_ble = use_mock_ble
 
         self._devices: dict[str, DiscoveredDevice] = {}
         self._lock = threading.RLock()
         self._running = False
         self._sweeper_thread: threading.Thread | None = None
+        self.ble_scanner: BleScanner | None = None
 
     def start(self) -> None:
-        """Start listening for service advertisements on the LAN."""
+        """Start listening for service advertisements on LAN and BLE."""
         with self._lock:
             if self._running:
                 return
@@ -282,18 +329,34 @@ class PeerBrowser(ServiceListener):
             self._running = True
             self.browser = ServiceBrowser(self.zc, self.service_type, listener=self)
 
+            # Start BLE scanner if enabled
+            if self.enable_ble:
+                self.ble_scanner = BleScanner(
+                    on_discovered=self._on_ble_discovered,
+                    use_mock=self.use_mock_ble,
+                )
+                self.ble_scanner.start()
+
             # Background thread to check for stale/expired devices
             self._sweeper_thread = threading.Thread(target=self._sweeper_loop, daemon=True)
             self._sweeper_thread.start()
             logger.debug("PeerBrowser started for service type %s", self.service_type)
 
     def stop(self) -> None:
-        """Stop browsing and release network sockets."""
+        """Stop browsing and release network and Bluetooth sockets."""
         with self._lock:
             if not self._running:
                 return
 
             self._running = False
+
+            if self.ble_scanner:
+                try:
+                    self.ble_scanner.stop()
+                except Exception:
+                    pass
+                self.ble_scanner = None
+
             if self.browser:
                 try:
                     self.browser.cancel()
@@ -310,9 +373,20 @@ class PeerBrowser(ServiceListener):
 
             logger.debug("PeerBrowser stopped.")
 
+    def _on_ble_discovered(self, adv: BleAdvertisement) -> None:
+        """Callback when a BLE advertisement is detected."""
+        self.registry.register_ble(
+            node_id=adv.node_id,
+            display_name=adv.display_name,
+            ble_address=adv.address,
+            rssi=adv.rssi,
+        )
+        if self.on_change:
+            self.on_change()
+
     # ServiceListener callbacks
     def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
-        """Invoked when a service advertisement is announced."""
+        """Invoked when an mDNS service advertisement is announced."""
         info = zc.get_service_info(type_, name)
         if not info:
             return
@@ -333,6 +407,19 @@ class PeerBrowser(ServiceListener):
             display_name = name.split(".")[0].rsplit("-", 1)[0]
 
         node_id = props.get("node_id", "")
+        if not node_id:
+            # Derive consistent node_id from service instance name
+            node_id = name.split(".")[0].split("-")[-1]
+
+        # Register in unified registry
+        self.registry.register_mdns(
+            node_id=node_id,
+            display_name=display_name,
+            addresses=addresses,
+            port=info.port,
+            service_name=name,
+            properties=props,
+        )
 
         with self._lock:
             device = DiscoveredDevice(
@@ -347,7 +434,7 @@ class PeerBrowser(ServiceListener):
             )
             self._devices[name] = device
             logger.info(
-                "Discovered device: '%s' at %s:%d (%s)",
+                "Discovered device via mDNS: '%s' at %s:%d (%s)",
                 display_name,
                 device.primary_address,
                 device.port,
@@ -362,7 +449,8 @@ class PeerBrowser(ServiceListener):
         self.add_service(zc, type_, name)
 
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
-        """Invoked when a goodbye packet is received."""
+        """Invoked when an mDNS goodbye packet is received."""
+        self.registry.mark_service_unavailable(name)
         with self._lock:
             if name in self._devices:
                 dev = self._devices[name]
@@ -378,6 +466,7 @@ class PeerBrowser(ServiceListener):
             time.sleep(5.0)
             now = time.time()
             changed = False
+            self.registry.clean_expired(DEFAULT_STALE_TIMEOUT)
             with self._lock:
                 for dev in self._devices.values():
                     if dev.is_available and (now - dev.last_seen > DEFAULT_STALE_TIMEOUT):
@@ -388,7 +477,7 @@ class PeerBrowser(ServiceListener):
                 self.on_change()
 
     def get_devices(self, include_unavailable: bool = False) -> list[DiscoveredDevice]:
-        """Return a copy of discovered devices."""
+        """Return a copy of discovered devices (mDNS DiscoveredDevice model)."""
         with self._lock:
             if include_unavailable:
                 return list(self._devices.values())
@@ -398,6 +487,14 @@ class PeerBrowser(ServiceListener):
         """Find an available device matching query string (name or address)."""
         available = self.get_devices(include_unavailable=False)
         # First try exact match
+        for dev in available:
+            if query.lower() == dev.display_name.lower() or query == dev.primary_address:
+                return dev
+        # Next try substring match
+        for dev in available:
+            if dev.matches_query(query):
+                return dev
+        return None
         for dev in available:
             if query.lower() == dev.display_name.lower() or query == dev.primary_address:
                 return dev
@@ -458,56 +555,63 @@ def format_device_table(devices: list[DiscoveredDevice]) -> str:
 def discover_peers_interactive(
     scan_seconds: float = 3.0,
     browser: PeerBrowser | None = None,
-) -> DiscoveredDevice | None:
-    """Scan the LAN, print available devices, and let user pick one interactively."""
+) -> UnifiedDevice | DiscoveredDevice | None:
+    """Scan LAN and BLE for AirDrop devices and prompt user to select a reachable target."""
     owns_browser = browser is None
     if browser is None:
         browser = PeerBrowser()
         browser.start()
 
     try:
-        print(f"Scanning local network for AirDrop devices ({scan_seconds:.1f}s)...")
+        print(f"Scanning for nearby AirDrop devices ({scan_seconds:.1f}s)...")
         time.sleep(scan_seconds)
 
-        devices = browser.get_devices(include_unavailable=False)
-        if not devices:
-            print("No AirDrop receivers found on the local network.")
+        reg_devices = browser.registry.get_devices(include_unavailable=False)
+        if not reg_devices:
+            print("No AirDrop receivers found nearby.")
             return None
 
-        print("\nDiscovered Devices:")
-        print(format_device_table(devices))
+        print("\nDiscovered Devices (mDNS + BLE):")
+        print(browser.registry.format_table(include_unavailable=False))
 
-        if len(devices) == 1:
-            choice = input(f"\nConnect to '{devices[0].display_name}'? [Y/n]: ").strip().lower()
+        # Filter only reachable devices (has IP and port)
+        reachable = [d for d in reg_devices if d.is_reachable]
+        if not reachable:
+            print("\nNotice: Discovered device(s) nearby via Bluetooth, but none are currently reachable over TCP.")
+            print("To transfer files, ensure both devices are connected to the same Wi-Fi/LAN network.")
+            return None
+
+        if len(reachable) == 1:
+            choice = input(f"\nConnect to '{reachable[0].display_name}' ({reachable[0].endpoint_str})? [Y/n]: ").strip().lower()
             if choice in ("", "y", "yes"):
-                return devices[0]
+                return reachable[0]
             return None
 
         while True:
-            sel = input(f"\nSelect a device (1-{len(devices)}) or 'q' to cancel: ").strip()
+            sel = input(f"\nSelect a reachable device (1-{len(reachable)}) or 'q' to cancel: ").strip()
             if sel.lower() in ("q", "quit", "exit"):
                 return None
             try:
                 num = int(sel)
-                if 1 <= num <= len(devices):
-                    return devices[num - 1]
+                if 1 <= num <= len(reachable):
+                    return reachable[num - 1]
             except ValueError:
                 pass
-            print(f"Invalid selection. Please enter a number between 1 and {len(devices)}.")
+            print(f"Invalid selection. Please enter a number between 1 and {len(reachable)}.")
     finally:
         if owns_browser:
             browser.stop()
 
 
 def main() -> None:
-    """CLI discovery monitor."""
+    """CLI discovery monitor showing unified mDNS and BLE devices."""
     parser = argparse.ArgumentParser(
-        description="AirDrop LAN Discovery - Scan and monitor active AirDrop devices."
+        description="AirDrop Unified Discovery - Scan and monitor active AirDrop devices on LAN & BLE."
     )
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="Continuously watch for network peers until interrupted",
+        help="Continuously watch for network and Bluetooth peers until interrupted",
     )
     parser.add_argument(
         "--timeout",
@@ -519,6 +623,11 @@ def main() -> None:
         "-a", "--all",
         action="store_true",
         help="Include departed or unavailable devices in listing",
+    )
+    parser.add_argument(
+        "--no-ble",
+        action="store_true",
+        help="Disable BLE discovery and scan via mDNS only",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -534,24 +643,26 @@ def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    print("AirDrop LAN Peer Discovery")
-    print(f"Browsing for service type '{AIRDROP_SERVICE_TYPE}'...")
+    print("=" * 60)
+    print("AirDrop Unified Peer Discovery (mDNS + BLE)")
+    print(f"mDNS Service: {AIRDROP_SERVICE_TYPE}")
+    print(f"BLE Service:  {AIRDROP_BLE_SERVICE_UUID}")
+    print("=" * 60)
 
-    browser = PeerBrowser()
+    browser = PeerBrowser(enable_ble=not args.no_ble)
     browser.start()
 
     try:
         if not args.watch:
             time.sleep(args.timeout)
-            devices = browser.get_devices(include_unavailable=args.all)
-            print("\n" + format_device_table(devices))
+            print("\n" + browser.registry.format_table(include_unavailable=args.all))
         else:
             print("Watching for peers in real time (Press Ctrl-C to stop)...")
             last_count = -1
             while True:
-                devices = browser.get_devices(include_unavailable=args.all)
+                devices = browser.registry.get_devices(include_unavailable=args.all)
                 if len(devices) != last_count:
-                    print("\n" + format_device_table(devices))
+                    print("\n" + browser.registry.format_table(include_unavailable=args.all))
                     last_count = len(devices)
                 time.sleep(2.0)
     except KeyboardInterrupt:

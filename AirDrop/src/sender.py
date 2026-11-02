@@ -213,6 +213,11 @@ def main() -> None:
         help="Scan LAN for AirDrop receivers and select interactively",
     )
     parser.add_argument(
+        "--no-ble",
+        action="store_true",
+        help="Disable BLE scanning and use mDNS only",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=DEFAULT_SOCKET_TIMEOUT,
@@ -271,20 +276,20 @@ def main() -> None:
                 "   or: python -m src.sender <host> <port> <file>"
             )
 
-        browser = PeerBrowser()
+        browser = PeerBrowser(enable_ble=not args.no_ble)
         browser.start()
         try:
-            target_device: DiscoveredDevice | None = None
+            target_device = None
             if args.to:
-                logger.info("Searching LAN for AirDrop receiver matching '%s'...", args.to)
+                logger.info("Searching LAN/BLE for AirDrop receiver matching '%s'...", args.to)
                 start_search = time.time()
                 while time.time() - start_search < 3.5:
-                    target_device = browser.find_device(args.to)
+                    target_device = browser.registry.find_device(args.to, only_reachable=True) or browser.find_device(args.to)
                     if target_device:
                         break
                     time.sleep(0.2)
                 if not target_device:
-                    logger.error("Device matching '%s' not found on the local network.", args.to)
+                    logger.error("Device matching '%s' not found on the local network or BLE.", args.to)
                     sys.exit(2)
             else:
                 target_device = discover_peers_interactive(scan_seconds=2.5, browser=browser)
@@ -292,8 +297,20 @@ def main() -> None:
                     logger.info("No target device selected. Exiting.")
                     sys.exit(0)
 
-            host = target_device.primary_address
+            if hasattr(target_device, "ip_address") and target_device.ip_address:
+                host = target_device.ip_address
+            else:
+                host = getattr(target_device, "primary_address", None)
             port = target_device.port
+
+            if not host or not port:
+                logger.error(
+                    "Device '%s' was discovered via BLE proximity, but has not resolved an IP address. "
+                    "Cannot initiate TCP file transfer.",
+                    target_device.display_name,
+                )
+                sys.exit(3)
+
             logger.info(
                 "Target acquired: '%s' (%s:%d)",
                 target_device.display_name,
