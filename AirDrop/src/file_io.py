@@ -192,6 +192,11 @@ class AtomicFileWriter:
 
             # Atomic replace
             os.replace(self.temp_path, self.target_path)
+            try:
+                # Protect received file from exposure to other local users (0600)
+                os.chmod(self.target_path, 0o600)
+            except OSError:
+                pass
             self._completed = True
             sha256_digest = self.hasher.hexdigest()
             logger.info("Successfully committed file to %s (sha256: %s)", self.target_path, sha256_digest)

@@ -68,6 +68,21 @@ class DiskSpaceError(AirDropError):
     pass
 
 
+class AuthenticationError(AirDropError):
+    """Raised when TLS handshake or peer certificate authentication fails."""
+    pass
+
+
+class TransferDeclinedError(AirDropError):
+    """Raised when recipient explicitly declines an incoming file transfer."""
+    pass
+
+
+class ConcurrencyLimitError(AirDropError):
+    """Raised when server has reached max concurrent transfers."""
+    pass
+
+
 def encode_header(
     filename: str,
     filesize: int,

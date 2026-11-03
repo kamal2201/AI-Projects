@@ -1,2 +1,4 @@
 zeroconf>=0.136.0
 bleak>=3.0.0
+cryptography>=41.0.0
+
